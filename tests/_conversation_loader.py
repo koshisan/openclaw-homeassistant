@@ -68,10 +68,14 @@ def load_conversation_module(*, streaming: str = "none") -> ModuleType:
         def async_render(
             self, variables: dict[str, Any], parse_result: bool = True
         ) -> str:
+            import re as _re
             out = self.template
             for key, value in (variables or {}).items():
                 out = out.replace("{{ " + key + " }}", str(value) if value is not None else "")
                 out = out.replace("{{" + key + "}}", str(value) if value is not None else "")
+            # Unresolved `{{ ... }}` — behave like Jinja with undefined vars:
+            # collapse to empty string so fallback paths are testable.
+            out = _re.sub(r"\{\{[^}]*\}\}", "", out)
             return out
 
     template_mod.Template = _StubTemplate

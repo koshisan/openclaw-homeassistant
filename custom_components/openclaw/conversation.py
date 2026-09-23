@@ -465,7 +465,23 @@ class OpenClawConversationEntity(conversation.ConversationEntity):
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
 
-        holding_phrase = config.get(CONF_HOLDING_PHRASE, DEFAULT_HOLDING_PHRASE)
+        # The holding phrase supports the same template syntax as system_prompt:
+        # rendered right before we speak it so live state (e.g. a phrase picked
+        # by an automation moments before the defer) is reflected.
+        raw_phrase = config.get(CONF_HOLDING_PHRASE, DEFAULT_HOLDING_PHRASE)
+        variables = {
+            "user_message": user_input.text,
+            "device_id": getattr(user_input, "device_id", None),
+            "language": getattr(user_input, "language", None),
+            "conversation_id": getattr(user_input, "conversation_id", None),
+        }
+        rendered_phrase = render_template(
+            self.hass,
+            raw_phrase,
+            variables,
+            fallback=DEFAULT_HOLDING_PHRASE,
+        )
+        holding_phrase = rendered_phrase.strip() or DEFAULT_HOLDING_PHRASE
         return self._build_plain_result(user_input, chat_log, holding_phrase)
 
     async def _background_report(
