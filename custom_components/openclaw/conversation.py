@@ -161,7 +161,10 @@ class OpenClawConversationEntity(conversation.ConversationEntity):
         """
         config = {**self._config_entry.data, **self._config_entry.options}
         if satellite is None:
-            satellite = config.get(CONF_PROACTIVE_SATELLITE)
+            # Renders the (possibly templated) CONF_PROACTIVE_SATELLITE at
+            # announce time — so an automation that just changed the target
+            # sensor is picked up before we speak.
+            satellite = self._resolve_configured_satellite()
         if not satellite:
             _LOGGER.warning(
                 "Proactive voice enabled but no satellite configured"
@@ -529,8 +532,28 @@ class OpenClawConversationEntity(conversation.ConversationEntity):
             return
         await self._async_announce(text, satellite=satellite)
 
+    def _resolve_configured_satellite(
+        self, device_id: str | None = None
+    ) -> str | None:
+        """Return the configured proactive satellite, rendered if a template.
+
+        Read from config on every call so an automation that flips
+        `input_text.voice_current_speaker` between defer-time and
+        announce-time is picked up. Empty template or blank string ->
+        None so callers can fall through to their default behavior.
+        """
+        config = {**self._config_entry.data, **self._config_entry.options}
+        raw = config.get(CONF_PROACTIVE_SATELLITE)
+        if not raw:
+            return None
+        variables = {
+            "device_id": device_id,
+        }
+        rendered = render_template(self.hass, raw, variables).strip()
+        return rendered or None
+
     def _resolve_report_satellite(self, device_id: str | None) -> str | None:
-        """Pick the satellite to report on: origin device, else proactive."""
+        """Pick the satellite to report on: origin device, else configured."""
         if device_id:
             try:
                 registry = er.async_get(self.hass)
@@ -543,8 +566,7 @@ class OpenClawConversationEntity(conversation.ConversationEntity):
                     device_id,
                     exc_info=True,
                 )
-        config = {**self._config_entry.data, **self._config_entry.options}
-        return config.get(CONF_PROACTIVE_SATELLITE)
+        return self._resolve_configured_satellite(device_id)
 
     def _build_streaming_result(
         self,

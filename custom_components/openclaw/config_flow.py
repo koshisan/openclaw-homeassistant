@@ -206,10 +206,16 @@ def _proactive_schema_fields(current: dict[str, Any] | None = None) -> dict:
         vol.Optional(
             CONF_PROACTIVE_SATELLITE,
             description={
-                "suggested_value": current.get(CONF_PROACTIVE_SATELLITE)
+                "suggested_value": current.get(CONF_PROACTIVE_SATELLITE, "")
             },
-        ): selector.EntitySelector(
-            selector.EntitySelectorConfig(domain="assist_satellite")
+        # A plain text field so the value can be either a static
+        # `assist_satellite.<name>` entity id OR a Jinja template like
+        # `{{ states('input_text.voice_current_speaker') }}`. Rendered on
+        # every announcement so a satellite chosen at request-time is
+        # honoured. Existing string values (entity ids) render as literals
+        # and keep working.
+        ): selector.TextSelector(
+            selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
         ),
         vol.Optional(
             CONF_PROACTIVE_MODE,
