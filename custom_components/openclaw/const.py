@@ -57,6 +57,15 @@ CONF_PROACTIVE_MODE = "proactive_mode"
 CONF_BACKGROUND_ENABLED = "background_enabled"
 CONF_BACKGROUND_GRACE = "background_grace"
 CONF_HOLDING_PHRASE = "holding_phrase"
+# Optional per-request system prefix. Rendered as a Jinja template at request
+# time and prepended to the user message with a blank line, so the agent gets
+# `<rendered prefix>\n\n<user message>`. Empty template = no prefix.
+# The template runs with `user_message`, `device_id`, and `language` as locals
+# and full access to Home Assistant state, so
+# `You are being invoked from {{ area_name(device_id) or 'somewhere' }}`
+# renders with the calling satellite's area.
+CONF_SYSTEM_PROMPT = "system_prompt"
+DEFAULT_SYSTEM_PROMPT = ""
 # Connection states
 STATE_CONNECTED = "connected"
 STATE_DISCONNECTED = "disconnected"
