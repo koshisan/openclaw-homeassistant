@@ -95,6 +95,31 @@ def load_conversation_module(*, streaming: str = "none") -> ModuleType:
         def async_add_assistant_content_without_tools(self, _content: Any) -> None:
             return None
 
+    if streaming == "modern":
+        # Modern (HA 2024.10+) — ChatLog has async_add_delta_content_stream.
+        # Consumes the stream, records deltas, and yields None once for each.
+        class ChatLog(ChatLog):  # type: ignore[no-redef]
+            def __init__(self) -> None:
+                self.deltas: list[Any] = []
+
+            async def async_add_delta_content_stream(
+                self, _agent_id: str, stream: Any
+            ):
+                async for delta in stream:
+                    self.deltas.append(delta)
+                    yield delta
+
+        def _async_get_result_from_chat_log(user_input: Any, chat_log: Any) -> Any:
+            return SimpleResult(chat_log=chat_log, user_input=user_input)
+
+        class SimpleResult:
+            def __init__(self, chat_log: Any, user_input: Any) -> None:
+                self.chat_log = chat_log
+                self.user_input = user_input
+                self.deltas = getattr(chat_log, "deltas", [])
+
+        conversation_mod.async_get_result_from_chat_log = _async_get_result_from_chat_log
+
     if streaming == "fallback":
         # __slots__ omits response_stream so setattr raises AttributeError,
         # forcing _build_streaming_result into the StreamingConversationResult branch.

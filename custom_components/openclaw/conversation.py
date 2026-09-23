@@ -210,7 +210,16 @@ class OpenClawConversationEntity(conversation.ConversationEntity):
 
     @staticmethod
     def _supports_streaming_result() -> bool:
-        """Return whether the HA conversation result supports streaming."""
+        """Return whether HA supports any conversation-streaming API.
+
+        Covers both the modern chat-log-delta path (HA 2024.10+, current
+        `ChatLog.async_add_delta_content_stream`) and the legacy
+        `response_stream`/`StreamingConversationResult` path older HA
+        versions used. The flag is exposed to HA at entity registration
+        time, so it must return True whenever *either* path is available.
+        """
+        if OpenClawConversationEntity._supports_modern_chat_stream():
+            return True
         if hasattr(conversation, "StreamingConversationResult"):
             return True
         result_cls = getattr(conversation, "ConversationResult", None)
@@ -225,6 +234,20 @@ class OpenClawConversationEntity(conversation.ConversationEntity):
         if isinstance(slots, str):
             return slots == "response_stream"
         return "response_stream" in slots
+
+    @staticmethod
+    def _supports_modern_chat_stream() -> bool:
+        """Modern (HA 2024.10+) streaming API: ChatLog.async_add_delta_content_stream.
+
+        When present, HA drives streaming TTS by listening on chat-log
+        content deltas — we feed OpenClaw chunks in as
+        `AssistantContentDeltaDict` items. When absent, callers must fall
+        back to the legacy `response_stream` attribute pattern.
+        """
+        chat_log_cls = getattr(conversation, "ChatLog", None)
+        return chat_log_cls is not None and hasattr(
+            chat_log_cls, "async_add_delta_content_stream"
+        )
 
     @property
     def device_info(self) -> dict[str, Any]:
@@ -344,6 +367,15 @@ class OpenClawConversationEntity(conversation.ConversationEntity):
         user_message = self._prefix_user_message(user_input, config)
 
         try:
+            # On HA 2024.10+, drive assist streaming via chat_log deltas.
+            # This is the only path that yields `synthesize-chunk` events
+            # to the Wyoming TTS side, unlocking per-sentence TTS overlap
+            # with the LLM. Legacy paths below stay for older HA cores.
+            if self._supports_modern_chat_stream():
+                return await self._handle_chat_log_streaming(
+                    user_input, chat_log, user_message, config
+                )
+
             if config.get(CONF_BACKGROUND_ENABLED, DEFAULT_BACKGROUND_ENABLED):
                 return await self._handle_with_grace(
                     user_input, chat_log, user_message, config
@@ -400,6 +432,67 @@ class OpenClawConversationEntity(conversation.ConversationEntity):
                 "An unexpected error occurred. Please try again.",
                 chat_log,
             )
+
+    async def _handle_chat_log_streaming(
+        self,
+        user_input: conversation.ConversationInput,
+        chat_log: conversation.ChatLog,
+        user_message: str,
+        config: dict[str, Any],
+    ) -> conversation.ConversationResult:
+        """Stream OpenClaw chunks into HA's chat log delta stream.
+
+        HA's assist pipeline listens on chat-log content deltas and forwards
+        each delta into the streaming-TTS input queue, so wyoming_openai
+        receives `synthesize-chunk` events instead of a single trailing
+        `synthesize` event. That's what turns per-sentence Higgs synthesis
+        into an actually-perceived streaming reply.
+
+        Background-defer still applies: if no first chunk arrives inside the
+        grace window, hand off to `_defer_to_background` exactly as before.
+        The stream never emits emoji-stripped text — HA doesn't yet expose
+        a per-delta transform hook, so emoji handling stays a legacy path
+        concern (the strip runs in `_finalize_response` for non-streaming
+        paths and in `_async_announce` for background reports).
+        """
+        agent_run = await self._gateway_client.begin_agent_run(user_message)
+        first_chunk: str | None = None
+        deferred_result: conversation.ConversationResult | None = None
+
+        if config.get(CONF_BACKGROUND_ENABLED, DEFAULT_BACKGROUND_ENABLED):
+            grace = config.get(CONF_BACKGROUND_GRACE, DEFAULT_BACKGROUND_GRACE)
+            try:
+                first_chunk = await agent_run.get_chunk(grace)
+            except asyncio.TimeoutError:
+                deferred_result = self._defer_to_background(
+                    user_input, chat_log, agent_run, config
+                )
+
+        if deferred_result is not None:
+            return deferred_result
+
+        async def _delta_stream():
+            """Wrap OpenClaw's text chunks as AssistantContentDeltaDict."""
+            # Signal a fresh assistant message. Everything after this delta
+            # is `content` accumulated onto that message.
+            yield {"role": "assistant"}
+            if first_chunk:
+                yield {"content": first_chunk}
+            async for chunk in self._gateway_client.stream_run(agent_run):
+                yield {"content": chunk}
+
+        # Consume the delta stream. `async_add_delta_content_stream`
+        # returns an async iterator of built Content objects — we don't
+        # care about them here, but the iterator must be drained for the
+        # deltas to be dispatched to the pipeline delta_listener.
+        async for _ in chat_log.async_add_delta_content_stream(
+            self.entity_id, _delta_stream()
+        ):
+            pass
+
+        return conversation.async_get_result_from_chat_log(
+            user_input, chat_log
+        )
 
     def _build_plain_result(
         self,
