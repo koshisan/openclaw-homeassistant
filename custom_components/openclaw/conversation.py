@@ -269,6 +269,30 @@ class OpenClawConversationEntity(conversation.ConversationEntity):
         """Return supported languages."""
         return "*"
 
+    def _resolve_input_satellite(self, device_id: str | None) -> str | None:
+        """Return the assist_satellite entity id of the calling device.
+
+        The integration is the only party that knows which speaker the
+        voice request originated from — the OpenClaw agent behind the
+        gateway has no context for it. We resolve it once, per request,
+        via the entity registry and expose it as a template variable
+        (`input_speaker`) so the system prompt can steer per-room.
+        """
+        if not device_id:
+            return None
+        try:
+            registry = er.async_get(self.hass)
+            for entry in er.async_entries_for_device(registry, device_id):
+                if entry.domain == "assist_satellite":
+                    return entry.entity_id
+        except Exception:  # pylint: disable=broad-except
+            _LOGGER.debug(
+                "Could not resolve input satellite for device %s",
+                device_id,
+                exc_info=True,
+            )
+        return None
+
     def _prefix_user_message(
         self,
         user_input: conversation.ConversationInput,
@@ -284,9 +308,15 @@ class OpenClawConversationEntity(conversation.ConversationEntity):
         raw = config.get(CONF_SYSTEM_PROMPT, DEFAULT_SYSTEM_PROMPT)
         if not raw or not raw.strip():
             return user_input.text
+        device_id = getattr(user_input, "device_id", None)
         variables = {
             "user_message": user_input.text,
-            "device_id": getattr(user_input, "device_id", None),
+            "device_id": device_id,
+            # The resolved assist_satellite entity id for the CALLING
+            # device, so a system prompt can say "Speaker: {{ input_speaker }}"
+            # and get the input side (where the user asked FROM), not the
+            # output side (where the result will be spoken).
+            "input_speaker": self._resolve_input_satellite(device_id),
             "language": getattr(user_input, "language", None),
             "conversation_id": getattr(user_input, "conversation_id", None),
         }

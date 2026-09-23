@@ -84,3 +84,14 @@ class TestPrefixUserMessage:
         config = {CONF_SYSTEM_PROMPT: "   \n\n  "}
         result = entity._prefix_user_message(_user_input("Hallo"), config)
         assert result == "Hallo"
+
+    def test_input_speaker_bound_even_when_none(self) -> None:
+        # _resolve_input_satellite returns None without a device_id (the
+        # entity registry stub in the loader has no entries) — the point
+        # is that the template renders without error and doesn't leave
+        # the {{ input_speaker }} marker untouched.
+        entity = _make_entity(prompt="Speaker: {{ input_speaker }}")
+        config = {CONF_SYSTEM_PROMPT: "Speaker: {{ input_speaker }}"}
+        result = entity._prefix_user_message(_user_input("hi"), config)
+        assert "{{ input_speaker }}" not in result
+        assert "hi" in result
