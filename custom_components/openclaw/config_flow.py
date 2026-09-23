@@ -181,7 +181,11 @@ def _background_schema_fields(current: dict[str, Any] | None = None) -> dict:
             default=current.get(
                 CONF_BACKGROUND_GRACE, DEFAULT_BACKGROUND_GRACE
             ),
-        ): vol.All(int, vol.Range(min=3, max=60)),
+        # Upper bound mirrors CONF_TIMEOUT (600s). The old 60s cap was
+        # too short for slow agents on cold cache; users who want to
+        # tolerate a long silent wait before deferring should be able
+        # to. Any positive value that fits within the timeout is valid.
+        ): vol.All(int, vol.Range(min=3, max=600)),
         vol.Optional(
             CONF_HOLDING_PHRASE,
             default=current.get(CONF_HOLDING_PHRASE, DEFAULT_HOLDING_PHRASE),
