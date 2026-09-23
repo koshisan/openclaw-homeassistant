@@ -54,6 +54,27 @@ def load_conversation_module(*, streaming: str = "none") -> ModuleType:
     exceptions_mod.HomeAssistantError = type(
         "HomeAssistantError", (Exception,), {}
     )
+    exceptions_mod.TemplateError = type("TemplateError", (Exception,), {})
+
+    # Minimal Template stub: renders literal strings, evaluates trivial
+    # `{{ variable }}` references from the local `variables` mapping. Just
+    # enough for _prefix_user_message unit tests without pulling in Jinja.
+    template_mod = _stub_module("homeassistant.helpers.template")
+
+    class _StubTemplate:
+        def __init__(self, template: str, _hass: Any = None) -> None:
+            self.template = template
+
+        def async_render(
+            self, variables: dict[str, Any], parse_result: bool = True
+        ) -> str:
+            out = self.template
+            for key, value in (variables or {}).items():
+                out = out.replace("{{ " + key + " }}", str(value) if value is not None else "")
+                out = out.replace("{{" + key + "}}", str(value) if value is not None else "")
+            return out
+
+    template_mod.Template = _StubTemplate
 
     class ConversationEntity:
         pass
@@ -146,6 +167,9 @@ def load_conversation_module(*, streaming: str = "none") -> ModuleType:
     _load_module("custom_components.openclaw.gateway", base / "gateway.py")
     _load_module(
         "custom_components.openclaw.gateway_client", base / "gateway_client.py"
+    )
+    _load_module(
+        "custom_components.openclaw.templating", base / "templating.py"
     )
     return _load_module(
         "custom_components.openclaw.conversation", base / "conversation.py"

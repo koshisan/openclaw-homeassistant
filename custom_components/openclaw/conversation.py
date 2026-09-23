@@ -25,6 +25,7 @@ from .const import (
     CONF_PROACTIVE_MODE,
     CONF_PROACTIVE_SATELLITE,
     CONF_STRIP_EMOJIS,
+    CONF_SYSTEM_PROMPT,
     CONF_TTS_MAX_CHARS,
     DEFAULT_BACKGROUND_ENABLED,
     DEFAULT_BACKGROUND_GRACE,
@@ -32,6 +33,7 @@ from .const import (
     DEFAULT_PROACTIVE_ENABLED,
     DEFAULT_PROACTIVE_MODE,
     DEFAULT_STRIP_EMOJIS,
+    DEFAULT_SYSTEM_PROMPT,
     DEFAULT_TTS_MAX_CHARS,
     DOMAIN,
     PROACTIVE_MODE_START_CONVERSATION,
@@ -43,6 +45,7 @@ from .exceptions import (
     GatewayTimeoutError,
 )
 from .gateway_client import AgentRun, OpenClawGatewayClient
+from .templating import render as render_template
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -263,6 +266,32 @@ class OpenClawConversationEntity(conversation.ConversationEntity):
         """Return supported languages."""
         return "*"
 
+    def _prefix_user_message(
+        self,
+        user_input: conversation.ConversationInput,
+        config: dict[str, Any],
+    ) -> str:
+        """Prepend the rendered `system_prompt` template to the user message.
+
+        The template is rendered against Home Assistant state on every request
+        so it always reflects current state (calling speaker, area, etc.).
+        Template rendering that fails logs a warning and falls back to no
+        prefix — a broken template must not brick the voice pipeline.
+        """
+        raw = config.get(CONF_SYSTEM_PROMPT, DEFAULT_SYSTEM_PROMPT)
+        if not raw or not raw.strip():
+            return user_input.text
+        variables = {
+            "user_message": user_input.text,
+            "device_id": getattr(user_input, "device_id", None),
+            "language": getattr(user_input, "language", None),
+            "conversation_id": getattr(user_input, "conversation_id", None),
+        }
+        rendered = render_template(self.hass, raw, variables).strip()
+        if not rendered:
+            return user_input.text
+        return f"{rendered}\n\n{user_input.text}"
+
     async def _async_handle_message(
         self,
         user_input: conversation.ConversationInput,
@@ -275,11 +304,13 @@ class OpenClawConversationEntity(conversation.ConversationEntity):
             user_input.conversation_id,
         )
 
-        # Extract user message
-        user_message = user_input.text
+        # Extract user message + optional Jinja-rendered system prefix. The
+        # prefix is prepended with a blank line so the agent sees
+        # `<prefix>\n\n<message>`. Empty/whitespace prefix → no change.
+        config = {**self._config_entry.data, **self._config_entry.options}
+        user_message = self._prefix_user_message(user_input, config)
 
         try:
-            config = {**self._config_entry.data, **self._config_entry.options}
             if config.get(CONF_BACKGROUND_ENABLED, DEFAULT_BACKGROUND_ENABLED):
                 return await self._handle_with_grace(
                     user_input, chat_log, user_message, config

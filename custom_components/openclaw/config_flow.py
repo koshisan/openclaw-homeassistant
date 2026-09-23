@@ -24,6 +24,7 @@ from .const import (
     CONF_PROACTIVE_SATELLITE,
     CONF_SESSION_KEY,
     CONF_STRIP_EMOJIS,
+    CONF_SYSTEM_PROMPT,
     CONF_THINKING,
     CONF_TTS_MAX_CHARS,
     CONF_USE_SSL,
@@ -38,6 +39,7 @@ from .const import (
     DEFAULT_PROACTIVE_MODE,
     DEFAULT_SESSION_KEY,
     DEFAULT_STRIP_EMOJIS,
+    DEFAULT_SYSTEM_PROMPT,
     DEFAULT_THINKING,
     DEFAULT_TTS_MAX_CHARS,
     DEFAULT_TIMEOUT,
@@ -566,6 +568,16 @@ class OpenClawOptionsFlowHandler(config_entries.OptionsFlow):
                         CONF_TTS_MAX_CHARS, DEFAULT_TTS_MAX_CHARS
                     ),
                 ): vol.All(int, vol.Range(min=0, max=2000)),
+                vol.Optional(
+                    CONF_SYSTEM_PROMPT,
+                    default=current.get(
+                        CONF_SYSTEM_PROMPT, DEFAULT_SYSTEM_PROMPT
+                    ),
+                ): selector.TextSelector(
+                    selector.TextSelectorConfig(
+                        multiline=True, type=selector.TextSelectorType.TEXT
+                    )
+                ),
                 **_background_schema_fields(current),
                 **_proactive_schema_fields(current),
             }
