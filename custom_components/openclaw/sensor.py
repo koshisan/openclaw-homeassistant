@@ -6,7 +6,11 @@ from datetime import timedelta
 import logging
 from typing import Any
 
-from homeassistant.components.sensor import SensorEntity, SensorStateClass
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorStateClass,
+)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
@@ -263,7 +267,9 @@ class OpenClawConversationStatusSensor(SensorEntity):
     _attr_icon = "mdi:chat-processing-outline"
     _attr_should_poll = False
     _attr_translation_key = "conversation_status"
-    _attr_device_class = None
+    # HA requires the ENUM device class when `options` is set — without it
+    # the sensor is flagged invalid and rendered as "unavailable".
+    _attr_device_class = SensorDeviceClass.ENUM
     _attr_options = CONVERSATION_STATES
 
     def __init__(
