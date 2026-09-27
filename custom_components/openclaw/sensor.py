@@ -9,7 +9,8 @@ from typing import Any
 from homeassistant.components.sensor import SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import (
     CoordinatorEntity,
@@ -17,7 +18,13 @@ from homeassistant.helpers.update_coordinator import (
     UpdateFailed,
 )
 
-from .const import DOMAIN
+from .const import (
+    CONVERSATION_STATES,
+    CONVERSATION_STATE_IDLE,
+    DATA_CONVERSATION_STATUS,
+    DOMAIN,
+)
+from .conversation_status import ConversationStatusTracker
 from .gateway_client import OpenClawGatewayClient
 
 _LOGGER = logging.getLogger(__name__)
@@ -72,11 +79,28 @@ async def async_setup_entry(
         except Exception:  # noqa: BLE001
             _LOGGER.debug("Initial %s refresh failed, will retry", coordinator.name)
 
-    async_add_entities([
+    entities: list[SensorEntity] = [
         OpenClawUptimeSensor(status_coordinator, entry.entry_id, client),
         OpenClawConnectedClientsSensor(entry.entry_id, client),
         OpenClawHealthSensor(health_coordinator, entry.entry_id),
-    ])
+    ]
+
+    tracker: ConversationStatusTracker | None = (
+        hass.data.get(DOMAIN, {})
+        .get(DATA_CONVERSATION_STATUS, {})
+        .get(entry.entry_id)
+    )
+    if tracker is not None:
+        entities.append(
+            OpenClawConversationStatusSensor(entry.entry_id, tracker)
+        )
+    else:
+        _LOGGER.warning(
+            "Conversation status tracker missing for %s; sensor skipped",
+            entry.entry_id,
+        )
+
+    async_add_entities(entities)
 
 
 class OpenClawUptimeSensor(CoordinatorEntity, SensorEntity):
@@ -224,3 +248,73 @@ class OpenClawHealthSensor(CoordinatorEntity, SensorEntity):
             if val is not None:
                 attrs[key] = val
         return attrs
+
+
+class OpenClawConversationStatusSensor(SensorEntity):
+    """Diagnostic sensor for the current conversation-request stage.
+
+    Pushed by `ConversationStatusTracker` via dispatcher; automations
+    trigger on state changes (e.g. `to: delayed`) instead of on a
+    custom event, which keeps the API stable when new stages get added
+    later.
+    """
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:chat-processing-outline"
+    _attr_should_poll = False
+    _attr_translation_key = "conversation_status"
+    _attr_device_class = None
+    _attr_options = CONVERSATION_STATES
+
+    def __init__(
+        self, entry_id: str, tracker: ConversationStatusTracker
+    ) -> None:
+        self._entry_id = entry_id
+        self._tracker = tracker
+        self._snapshot = tracker.snapshot
+        self._attr_name = "OpenClaw Conversation Status"
+        self._attr_unique_id = f"{entry_id}_conversation_status"
+
+    @property
+    def device_info(self) -> dict[str, Any]:
+        return {
+            "identifiers": {(DOMAIN, self._entry_id)},
+            "name": "OpenClaw Gateway",
+            "manufacturer": "OpenClaw",
+            "model": "Gateway",
+        }
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        # Seed with the tracker's live snapshot in case a transition
+        # happened between entity construction and platform-add.
+        self._snapshot = self._tracker.snapshot
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass, self._tracker.signal, self._handle_update
+            )
+        )
+
+    @callback
+    def _handle_update(self, snapshot: dict[str, Any]) -> None:
+        self._snapshot = snapshot
+        self.async_write_ha_state()
+
+    @property
+    def native_value(self) -> str:
+        return self._snapshot.get("state") or CONVERSATION_STATE_IDLE
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        snap = self._snapshot
+        # Keep the attribute set stable across states so template consumers
+        # can address every field without existence guards; unused ones are
+        # exposed as None rather than dropped.
+        return {
+            "run_id": snap.get("run_id"),
+            "device_id": snap.get("device_id"),
+            "user_message": snap.get("user_message"),
+            "holding_phrase": snap.get("holding_phrase"),
+            "error": snap.get("error"),
+            "changed_at": snap.get("changed_at"),
+        }

@@ -92,5 +92,39 @@
       "title": "Device approval required",
       "description": "This Home Assistant device needs to be approved in OpenClaw before it can connect. Approve it using the OpenClaw CLI or Control UI, then reload the integration."
     }
+  },
+  "entity": {
+    "sensor": {
+      "conversation_status": {
+        "name": "Conversation Status",
+        "state": {
+          "idle": "Idle",
+          "pending": "Pending",
+          "delayed": "Delayed",
+          "announcing": "Announcing",
+          "error": "Error"
+        },
+        "state_attributes": {
+          "run_id": {
+            "name": "Agent run id"
+          },
+          "device_id": {
+            "name": "Device id"
+          },
+          "user_message": {
+            "name": "User message"
+          },
+          "holding_phrase": {
+            "name": "Holding phrase"
+          },
+          "error": {
+            "name": "Error detail"
+          },
+          "changed_at": {
+            "name": "Changed at"
+          }
+        }
+      }
+    }
   }
 }
