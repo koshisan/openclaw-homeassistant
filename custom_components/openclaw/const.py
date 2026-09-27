@@ -92,3 +92,28 @@ CLIENT_MODE = "backend"
 DEVICE_ROLE = "operator"
 DEVICE_SCOPES = ["operator.read", "operator.write"]
 CHALLENGE_TIMEOUT = 2.0  # seconds to wait for connect.challenge before fallback
+
+# Conversation-status diagnostic sensor.
+# `idle` and `error` are terminal (until the next request); `pending`,
+# `delayed`, `announcing` mark the in-flight stages. Automations trigger
+# on state changes (e.g. `to: delayed` to rotate a holding-phrase helper
+# without needing a per-integration event).
+CONVERSATION_STATE_IDLE = "idle"
+CONVERSATION_STATE_PENDING = "pending"
+CONVERSATION_STATE_DELAYED = "delayed"
+CONVERSATION_STATE_ANNOUNCING = "announcing"
+CONVERSATION_STATE_ERROR = "error"
+CONVERSATION_STATES = [
+    CONVERSATION_STATE_IDLE,
+    CONVERSATION_STATE_PENDING,
+    CONVERSATION_STATE_DELAYED,
+    CONVERSATION_STATE_ANNOUNCING,
+    CONVERSATION_STATE_ERROR,
+]
+
+# Dispatcher signal for status-sensor updates. Suffix with the config-entry
+# id when connecting/sending so multi-instance installs stay isolated.
+SIGNAL_CONVERSATION_STATUS = f"{DOMAIN}_conversation_status"
+
+# hass.data sub-key: maps entry_id → ConversationStatusTracker.
+DATA_CONVERSATION_STATUS = "conversation_status_trackers"

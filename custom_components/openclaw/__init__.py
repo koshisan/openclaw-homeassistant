@@ -21,6 +21,7 @@ from .const import (
     CONF_TIMEOUT,
     CONF_TTS_MAX_CHARS,
     CONF_USE_SSL,
+    DATA_CONVERSATION_STATUS,
     DEFAULT_AGENT_ID,
     DEFAULT_MODEL,
     DEFAULT_SESSION_KEY,
@@ -31,6 +32,7 @@ from .const import (
     DEFAULT_USE_SSL,
     DOMAIN,
 )
+from .conversation_status import ConversationStatusTracker
 from .exceptions import (
     DevicePairingRequiredError,
     GatewayAuthenticationError,
@@ -153,6 +155,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = gateway_client
 
+    # Diagnostic tracker for the conversation-status sensor. Lives in a
+    # sibling dict so the client-iteration filters below stay untouched.
+    trackers = hass.data[DOMAIN].setdefault(DATA_CONVERSATION_STATUS, {})
+    trackers[entry.entry_id] = ConversationStatusTracker(hass, entry.entry_id)
+
     if not hass.data[DOMAIN].get(_SERVICE_REGISTERED):
         async def _async_handle_reconnect(call) -> None:
             entry_id = call.data.get("entry_id")
@@ -168,7 +175,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 targets = [
                     client
                     for key, client in clients.items()
-                    if key not in (_SERVICE_REGISTERED, _PLATFORMS_LOADED)
+                    if key not in (
+                        _SERVICE_REGISTERED,
+                        _PLATFORMS_LOADED,
+                        DATA_CONVERSATION_STATUS,
+                    )
                 ]
 
             for client in targets:
@@ -201,7 +212,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 targets = [
                     client
                     for key, client in clients.items()
-                    if key not in (_SERVICE_REGISTERED, _PLATFORMS_LOADED)
+                    if key not in (
+                        _SERVICE_REGISTERED,
+                        _PLATFORMS_LOADED,
+                        DATA_CONVERSATION_STATUS,
+                    )
                 ]
 
             for client in targets:
@@ -273,6 +288,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await gateway_client.disconnect()
         _LOGGER.info("Disconnected from OpenClaw Gateway")
     hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+    trackers = hass.data.get(DOMAIN, {}).get(DATA_CONVERSATION_STATUS)
+    if trackers is not None:
+        trackers.pop(entry.entry_id, None)
 
     return unload_ok
 

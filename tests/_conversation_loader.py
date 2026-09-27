@@ -172,8 +172,16 @@ def load_conversation_module(*, streaming: str = "none") -> ModuleType:
     conversation_mod.ConversationResult = ConversationResult
     config_entries_mod.ConfigEntry = object
     core_mod.HomeAssistant = object
+    core_mod.callback = lambda fn: fn
     intent_mod.IntentResponse = IntentResponse
     entity_platform_mod.AddEntitiesCallback = object
+
+    # The conversation-status tracker imports the dispatcher helper.
+    dispatcher_mod = _stub_module("homeassistant.helpers.dispatcher")
+    dispatcher_mod.async_dispatcher_send = lambda *_args, **_kwargs: None
+    dispatcher_mod.async_dispatcher_connect = lambda *_args, **_kwargs: (
+        lambda: None
+    )
 
     repo_root = Path(__file__).parent.parent
     base = repo_root / "custom_components" / "openclaw"
@@ -199,6 +207,10 @@ def load_conversation_module(*, streaming: str = "none") -> ModuleType:
     )
     _load_module(
         "custom_components.openclaw.templating", base / "templating.py"
+    )
+    _load_module(
+        "custom_components.openclaw.conversation_status",
+        base / "conversation_status.py",
     )
     return _load_module(
         "custom_components.openclaw.conversation", base / "conversation.py"

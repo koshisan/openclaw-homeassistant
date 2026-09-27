@@ -27,6 +27,7 @@ from .const import (
     CONF_STRIP_EMOJIS,
     CONF_SYSTEM_PROMPT,
     CONF_TTS_MAX_CHARS,
+    DATA_CONVERSATION_STATUS,
     DEFAULT_BACKGROUND_ENABLED,
     DEFAULT_BACKGROUND_GRACE,
     DEFAULT_HOLDING_PHRASE,
@@ -38,6 +39,7 @@ from .const import (
     DOMAIN,
     PROACTIVE_MODE_START_CONVERSATION,
 )
+from .conversation_status import ConversationStatusTracker
 from .exceptions import (
     AgentExecutionError,
     GatewayAuthenticationError,
@@ -107,8 +109,18 @@ async def async_setup_entry(
 ) -> None:
     """Set up OpenClaw conversation entity."""
     gateway_client: OpenClawGatewayClient = hass.data[DOMAIN][config_entry.entry_id]
+    # The tracker is created up in `__init__.async_setup_entry` before
+    # platforms fan out; a missing entry means someone re-arranged setup
+    # order and the diagnostic sensor will just no-op.
+    status_tracker: ConversationStatusTracker | None = (
+        hass.data.get(DOMAIN, {})
+        .get(DATA_CONVERSATION_STATUS, {})
+        .get(config_entry.entry_id)
+    )
 
-    async_add_entities([OpenClawConversationEntity(config_entry, gateway_client)])
+    async_add_entities(
+        [OpenClawConversationEntity(config_entry, gateway_client, status_tracker)]
+    )
 
 
 class OpenClawConversationEntity(conversation.ConversationEntity):
@@ -120,11 +132,15 @@ class OpenClawConversationEntity(conversation.ConversationEntity):
     _attr_supports_streaming = False
 
     def __init__(
-        self, config_entry: ConfigEntry, gateway_client: OpenClawGatewayClient
+        self,
+        config_entry: ConfigEntry,
+        gateway_client: OpenClawGatewayClient,
+        status_tracker: ConversationStatusTracker | None = None,
     ) -> None:
         """Initialize the conversation entity."""
         self._config_entry = config_entry
         self._gateway_client = gateway_client
+        self._status_tracker = status_tracker
         self._attr_unique_id = config_entry.entry_id
         self._attr_supports_streaming = self._supports_streaming_result()
         # Runs detached past the grace period, reporting back via announce.
@@ -138,6 +154,14 @@ class OpenClawConversationEntity(conversation.ConversationEntity):
             self._gateway_client.set_proactive_handler(
                 self._on_proactive_message
             )
+
+    def _status(self) -> ConversationStatusTracker | None:
+        """Return the diagnostic tracker if setup wired one; else None.
+
+        Defensive `getattr` because some direct-construction paths (tests,
+        older setup helpers) predate the tracker constructor arg.
+        """
+        return getattr(self, "_status_tracker", None)
 
     async def async_will_remove_from_hass(self) -> None:
         """Stop receiving proactive announcements and drop background runs."""
@@ -366,6 +390,17 @@ class OpenClawConversationEntity(conversation.ConversationEntity):
         config = {**self._config_entry.data, **self._config_entry.options}
         user_message = self._prefix_user_message(user_input, config)
 
+        # Diagnostic status: enter `pending` for every incoming turn.
+        # The nested paths (chat-log streaming, grace-defer, direct)
+        # transition to `delayed` themselves; success/error transitions
+        # for the direct path are marked below.
+        tracker = self._status()
+        if tracker is not None:
+            tracker.set_pending(
+                device_id=getattr(user_input, "device_id", None),
+                user_message=user_input.text,
+            )
+
         try:
             # On HA 2024.10+, drive assist streaming via chat_log deltas.
             # This is the only path that yields `synthesize-chunk` events
@@ -385,15 +420,22 @@ class OpenClawConversationEntity(conversation.ConversationEntity):
                 user_input, chat_log, user_message
             )
             if streaming_result is not None:
+                if tracker is not None:
+                    tracker.set_idle()
                 return streaming_result
 
             response_text = await self._gateway_client.send_agent_request(
                 user_message
             )
-            return self._build_plain_result(user_input, chat_log, response_text)
+            result = self._build_plain_result(user_input, chat_log, response_text)
+            if tracker is not None:
+                tracker.set_idle()
+            return result
 
         except GatewayAuthenticationError as err:
             _LOGGER.error("Gateway authentication error: %s", err)
+            if tracker is not None:
+                tracker.set_error(error=f"auth: {err}")
             return self._create_error_result(
                 user_input,
                 "The gateway token is no longer valid. Please update it in "
@@ -403,6 +445,8 @@ class OpenClawConversationEntity(conversation.ConversationEntity):
 
         except GatewayConnectionError as err:
             _LOGGER.error("Gateway connection error: %s", err)
+            if tracker is not None:
+                tracker.set_error(error=f"connection: {err}")
             return self._create_error_result(
                 user_input,
                 "I'm having trouble connecting to the Gateway. Please check your configuration.",
@@ -411,6 +455,8 @@ class OpenClawConversationEntity(conversation.ConversationEntity):
 
         except GatewayTimeoutError as err:
             _LOGGER.warning("Gateway timeout: %s", err)
+            if tracker is not None:
+                tracker.set_error(error=f"timeout: {err}")
             return self._create_error_result(
                 user_input,
                 "The response took too long. Please try again.",
@@ -419,6 +465,8 @@ class OpenClawConversationEntity(conversation.ConversationEntity):
 
         except AgentExecutionError as err:
             _LOGGER.error("Agent execution error: %s", err)
+            if tracker is not None:
+                tracker.set_error(error=f"agent: {err}")
             return self._create_error_result(
                 user_input,
                 "I encountered an error while processing your request. Please try again.",
@@ -427,6 +475,8 @@ class OpenClawConversationEntity(conversation.ConversationEntity):
 
         except Exception as err:  # pylint: disable=broad-except
             _LOGGER.exception("Unexpected error in message handling")
+            if tracker is not None:
+                tracker.set_error(error=f"unexpected: {err}")
             return self._create_error_result(
                 user_input,
                 "An unexpected error occurred. Please try again.",
@@ -490,9 +540,13 @@ class OpenClawConversationEntity(conversation.ConversationEntity):
         ):
             pass
 
-        return conversation.async_get_result_from_chat_log(
+        result = conversation.async_get_result_from_chat_log(
             user_input, chat_log
         )
+        tracker = self._status()
+        if tracker is not None:
+            tracker.set_idle()
+        return result
 
     def _build_plain_result(
         self,
@@ -543,7 +597,10 @@ class OpenClawConversationEntity(conversation.ConversationEntity):
             user_message,
             chunk_source=self._resume_stream(agent_run, first_chunk),
         )
+        tracker = self._status()
         if streaming_result is not None:
+            if tracker is not None:
+                tracker.set_idle()
             return streaming_result
 
         # No streaming support: drain to completion and answer plainly.
@@ -551,7 +608,10 @@ class OpenClawConversationEntity(conversation.ConversationEntity):
         async for chunk in self._gateway_client.stream_run(agent_run):
             chunks.append(chunk)
         response_text = agent_run.get_response() or "".join(chunks)
-        return self._build_plain_result(user_input, chat_log, response_text)
+        result = self._build_plain_result(user_input, chat_log, response_text)
+        if tracker is not None:
+            tracker.set_idle()
+        return result
 
     async def _resume_stream(
         self, agent_run: AgentRun, first_chunk: str | None
@@ -608,12 +668,22 @@ class OpenClawConversationEntity(conversation.ConversationEntity):
             fallback=DEFAULT_HOLDING_PHRASE,
         )
         holding_phrase = rendered_phrase.strip() or DEFAULT_HOLDING_PHRASE
+        # Diagnostic: mark the run as delayed with the rendered phrase +
+        # this run's id so automations can trigger on state → delayed and
+        # rotate the input_text helper for the next request.
+        tracker = self._status()
+        if tracker is not None:
+            tracker.set_delayed(
+                holding_phrase=holding_phrase, run_id=agent_run.run_id
+            )
         return self._build_plain_result(user_input, chat_log, holding_phrase)
 
     async def _background_report(
         self, agent_run: AgentRun, device_id: str | None
     ) -> None:
         """Await a detached run and announce its result on a satellite."""
+        tracker = self._status()
+        errored = False
         try:
             # Overall completion budget, deliberately independent of the
             # voice-tuned agent timeout — a short one must not strangle a
@@ -628,20 +698,35 @@ class OpenClawConversationEntity(conversation.ConversationEntity):
                 BACKGROUND_MAX_SECONDS,
             )
             text = BACKGROUND_TIMEOUT_PHRASE
+            errored = True
+            if tracker is not None:
+                tracker.set_error(
+                    error=f"background timeout after {BACKGROUND_MAX_SECONDS}s"
+                )
         except asyncio.CancelledError:
             raise
         except AgentExecutionError as err:
             _LOGGER.error("Background run %s failed: %s", agent_run.run_id, err)
             text = BACKGROUND_ERROR_PHRASE
-        except Exception:  # pylint: disable=broad-except
+            errored = True
+            if tracker is not None:
+                tracker.set_error(error=f"background agent: {err}")
+        except Exception as err:  # pylint: disable=broad-except
             _LOGGER.exception("Unexpected error in background run %s", agent_run.run_id)
             text = BACKGROUND_ERROR_PHRASE
+            errored = True
+            if tracker is not None:
+                tracker.set_error(error=f"background unexpected: {err}")
 
         if not text:
             _LOGGER.debug(
                 "Background run %s finished with no text to announce",
                 agent_run.run_id,
             )
+            # Nothing more to speak; return to idle unless an error was
+            # already surfaced (leave the error snapshot visible).
+            if tracker is not None and not errored:
+                tracker.set_idle()
             return
 
         satellite = self._resolve_report_satellite(device_id)
@@ -652,8 +737,21 @@ class OpenClawConversationEntity(conversation.ConversationEntity):
                 "proactive satellite configured)",
                 agent_run.run_id,
             )
+            if tracker is not None and not errored:
+                tracker.set_idle()
             return
-        await self._async_announce(text, satellite=satellite)
+
+        if tracker is not None:
+            tracker.set_announcing(run_id=agent_run.run_id)
+        try:
+            await self._async_announce(text, satellite=satellite)
+        finally:
+            # `announce` may raise for satellite offline/busy, which we
+            # already log inside `_async_announce`; either way, the run is
+            # over and the tracker should return to idle unless an error
+            # transition already stamped it above.
+            if tracker is not None and not errored:
+                tracker.set_idle()
 
     def _resolve_configured_satellite(
         self, device_id: str | None = None
