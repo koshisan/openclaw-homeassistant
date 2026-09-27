@@ -27,6 +27,10 @@ class _SensorStateClass:
     MEASUREMENT = "measurement"
 
 
+class _SensorDeviceClass:
+    ENUM = "enum"
+
+
 class _EntityCategory:
     DIAGNOSTIC = "diagnostic"
 
@@ -44,6 +48,7 @@ _ha = MagicMock()
 _sensor_mod = ModuleType("homeassistant.components.sensor")
 _sensor_mod.SensorEntity = _SensorEntity  # type: ignore[attr-defined]
 _sensor_mod.SensorStateClass = _SensorStateClass  # type: ignore[attr-defined]
+_sensor_mod.SensorDeviceClass = _SensorDeviceClass  # type: ignore[attr-defined]
 
 _const_mod = ModuleType("homeassistant.const")
 _const_mod.EntityCategory = _EntityCategory  # type: ignore[attr-defined]
