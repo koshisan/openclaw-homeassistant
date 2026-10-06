@@ -366,15 +366,18 @@ class GatewayProtocol:
         connect_params["role"] = DEVICE_ROLE
         connect_params["scopes"] = DEVICE_SCOPES
 
-        # Include device credentials when a challenge nonce is received,
-        # hass is available for keypair storage, and we have a token to
-        # bind into the signature payload. In trusted-proxy mode the
-        # gateway identifies the user via the reverse-proxy headers and
-        # does not require per-client device pairing, so sending an
-        # empty-token signature here only muddies the server-side
-        # attribution. Omit the device block entirely in that case and
-        # let the proxy attestation stand on its own.
-        if nonce and self._hass and self._token:
+        # Include device credentials when a challenge nonce is received
+        # and hass is available for keypair storage. The device signature
+        # also carries the client's scope request, which the gateway's
+        # `deviceAutoApprove` policy uses to decide what to grant. Even
+        # in trusted-proxy mode (no token configured) we still want to
+        # present a signed device identity, otherwise the server-side
+        # user ends up with zero scopes and every subsequent RPC fails
+        # with "missing scope: operator.read". The token field of the
+        # signature payload is left as an empty string when no token is
+        # configured — the signature itself still verifies, and the
+        # trusted-proxy attribution supplies the user identity.
+        if nonce and self._hass:
             key = await async_load_or_create_keypair(self._hass)
             connect_params["device"] = build_device_auth_dict(
                 key=key,
@@ -382,15 +385,16 @@ class GatewayProtocol:
                 client_mode=CLIENT_MODE,
                 role=DEVICE_ROLE,
                 scopes=DEVICE_SCOPES,
-                token=self._token,
+                token=self._token or "",
                 nonce=nonce,
             )
-            _LOGGER.debug("Including device credentials in connect request")
-        elif nonce and not self._token:
-            _LOGGER.debug(
-                "Challenge received without token; "
-                "relying on trusted-proxy attribution for auth"
-            )
+            if self._token:
+                _LOGGER.debug("Including device credentials in connect request")
+            else:
+                _LOGGER.debug(
+                    "Including device credentials (empty-token signature) "
+                    "to request scopes under trusted-proxy auth"
+                )
         elif nonce:
             _LOGGER.debug(
                 "Challenge received but no hass context; "
