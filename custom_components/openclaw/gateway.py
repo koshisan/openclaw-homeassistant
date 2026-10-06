@@ -366,9 +366,15 @@ class GatewayProtocol:
         connect_params["role"] = DEVICE_ROLE
         connect_params["scopes"] = DEVICE_SCOPES
 
-        # Include device credentials when a challenge nonce is received
-        # and hass is available for keypair storage.
-        if nonce and self._hass:
+        # Include device credentials when a challenge nonce is received,
+        # hass is available for keypair storage, and we have a token to
+        # bind into the signature payload. In trusted-proxy mode the
+        # gateway identifies the user via the reverse-proxy headers and
+        # does not require per-client device pairing, so sending an
+        # empty-token signature here only muddies the server-side
+        # attribution. Omit the device block entirely in that case and
+        # let the proxy attestation stand on its own.
+        if nonce and self._hass and self._token:
             key = await async_load_or_create_keypair(self._hass)
             connect_params["device"] = build_device_auth_dict(
                 key=key,
@@ -376,10 +382,15 @@ class GatewayProtocol:
                 client_mode=CLIENT_MODE,
                 role=DEVICE_ROLE,
                 scopes=DEVICE_SCOPES,
-                token=self._token or "",
+                token=self._token,
                 nonce=nonce,
             )
             _LOGGER.debug("Including device credentials in connect request")
+        elif nonce and not self._token:
+            _LOGGER.debug(
+                "Challenge received without token; "
+                "relying on trusted-proxy attribution for auth"
+            )
         elif nonce:
             _LOGGER.debug(
                 "Challenge received but no hass context; "
@@ -447,10 +458,16 @@ class GatewayProtocol:
                         f"Device pairing required: {error_msg}"
                     )
 
-                if any(
-                    kw in error_lower
-                    for kw in ("auth", "token", "nonce", "device", "pair")
-                ):
+                # Keyword fallback for gateways that reject with a free-text
+                # message instead of a structured code. Skip the "token"
+                # keyword when no token was configured — in trusted-proxy
+                # mode the server's reject text often mentions "token" even
+                # though the actual cause is a proxy-header mismatch that
+                # a config-flow reauth prompt can't fix.
+                keywords = ("auth", "nonce", "device", "pair")
+                if self._token:
+                    keywords = (*keywords, "token")
+                if any(kw in error_lower for kw in keywords):
                     raise GatewayAuthenticationError(
                         f"Authentication failed: {error_msg}"
                     )
@@ -663,13 +680,26 @@ class GatewayProtocol:
                     error_text = str(error_msg.get("message", error_msg))
 
                 error_text_lower = error_text.lower()
-                if (
-                    error_code in {"UNAUTHORIZED", "FORBIDDEN", "AUTH_FAILED"}
-                    or "missing scope" in error_text_lower
-                    or "invalid token" in error_text_lower
-                    or "authentication" in error_text_lower
-                    or "unauthorized" in error_text_lower
-                ):
+                # Classify the request-level failure. In trusted-proxy mode
+                # (no local token) we deliberately avoid raising
+                # GatewayAuthenticationError on free-text "token"/"auth"
+                # phrasings, because that triggers the integration's
+                # reauth-token prompt — and there is no token to re-enter.
+                # Structured auth codes still raise, since those are
+                # unambiguous even without a client token.
+                auth_error = error_code in {
+                    "UNAUTHORIZED",
+                    "FORBIDDEN",
+                    "AUTH_FAILED",
+                }
+                if not auth_error and self._token:
+                    auth_error = (
+                        "missing scope" in error_text_lower
+                        or "invalid token" in error_text_lower
+                        or "authentication" in error_text_lower
+                        or "unauthorized" in error_text_lower
+                    )
+                if auth_error:
                     raise GatewayAuthenticationError(
                         f"Request failed: {error_text}"
                     )
