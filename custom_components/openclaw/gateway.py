@@ -165,6 +165,15 @@ class GatewayProtocol:
                     ping_interval=30,
                     ping_timeout=10,
                     additional_headers=headers,
+                    # openclaw's authenticated-side server frame limit is
+                    # 25 MiB (MAX_PAYLOAD_BYTES). The websockets library
+                    # default max_size on the client is 1 MiB, which
+                    # closes the connection with code 1009 the moment a
+                    # busy session subscribes to its own message history
+                    # (easily 1.5–6 MiB for an agent with real tool-call
+                    # context). Match the server's cap so replay frames
+                    # don't trip a false "message too big" close.
+                    max_size=26 * 1024 * 1024,
                 ) as websocket:
                     self._websocket = websocket
                     try:
@@ -367,7 +376,16 @@ class GatewayProtocol:
         connect_params["scopes"] = DEVICE_SCOPES
 
         # Include device credentials when a challenge nonce is received
-        # and hass is available for keypair storage.
+        # and hass is available for keypair storage. The device signature
+        # also carries the client's scope request, which the gateway's
+        # `deviceAutoApprove` policy uses to decide what to grant. Even
+        # in trusted-proxy mode (no token configured) we still want to
+        # present a signed device identity, otherwise the server-side
+        # user ends up with zero scopes and every subsequent RPC fails
+        # with "missing scope: operator.read". The token field of the
+        # signature payload is left as an empty string when no token is
+        # configured — the signature itself still verifies, and the
+        # trusted-proxy attribution supplies the user identity.
         if nonce and self._hass:
             key = await async_load_or_create_keypair(self._hass)
             connect_params["device"] = build_device_auth_dict(
@@ -379,7 +397,13 @@ class GatewayProtocol:
                 token=self._token or "",
                 nonce=nonce,
             )
-            _LOGGER.debug("Including device credentials in connect request")
+            if self._token:
+                _LOGGER.debug("Including device credentials in connect request")
+            else:
+                _LOGGER.debug(
+                    "Including device credentials (empty-token signature) "
+                    "to request scopes under trusted-proxy auth"
+                )
         elif nonce:
             _LOGGER.debug(
                 "Challenge received but no hass context; "
@@ -447,10 +471,16 @@ class GatewayProtocol:
                         f"Device pairing required: {error_msg}"
                     )
 
-                if any(
-                    kw in error_lower
-                    for kw in ("auth", "token", "nonce", "device", "pair")
-                ):
+                # Keyword fallback for gateways that reject with a free-text
+                # message instead of a structured code. Skip the "token"
+                # keyword when no token was configured — in trusted-proxy
+                # mode the server's reject text often mentions "token" even
+                # though the actual cause is a proxy-header mismatch that
+                # a config-flow reauth prompt can't fix.
+                keywords = ("auth", "nonce", "device", "pair")
+                if self._token:
+                    keywords = (*keywords, "token")
+                if any(kw in error_lower for kw in keywords):
                     raise GatewayAuthenticationError(
                         f"Authentication failed: {error_msg}"
                     )
@@ -663,13 +693,26 @@ class GatewayProtocol:
                     error_text = str(error_msg.get("message", error_msg))
 
                 error_text_lower = error_text.lower()
-                if (
-                    error_code in {"UNAUTHORIZED", "FORBIDDEN", "AUTH_FAILED"}
-                    or "missing scope" in error_text_lower
-                    or "invalid token" in error_text_lower
-                    or "authentication" in error_text_lower
-                    or "unauthorized" in error_text_lower
-                ):
+                # Classify the request-level failure. In trusted-proxy mode
+                # (no local token) we deliberately avoid raising
+                # GatewayAuthenticationError on free-text "token"/"auth"
+                # phrasings, because that triggers the integration's
+                # reauth-token prompt — and there is no token to re-enter.
+                # Structured auth codes still raise, since those are
+                # unambiguous even without a client token.
+                auth_error = error_code in {
+                    "UNAUTHORIZED",
+                    "FORBIDDEN",
+                    "AUTH_FAILED",
+                }
+                if not auth_error and self._token:
+                    auth_error = (
+                        "missing scope" in error_text_lower
+                        or "invalid token" in error_text_lower
+                        or "authentication" in error_text_lower
+                        or "unauthorized" in error_text_lower
+                    )
+                if auth_error:
                     raise GatewayAuthenticationError(
                         f"Request failed: {error_text}"
                     )
