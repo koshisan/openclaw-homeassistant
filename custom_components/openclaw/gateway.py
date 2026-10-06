@@ -165,6 +165,15 @@ class GatewayProtocol:
                     ping_interval=30,
                     ping_timeout=10,
                     additional_headers=headers,
+                    # openclaw's authenticated-side server frame limit is
+                    # 25 MiB (MAX_PAYLOAD_BYTES). The websockets library
+                    # default max_size on the client is 1 MiB, which
+                    # closes the connection with code 1009 the moment a
+                    # busy session subscribes to its own message history
+                    # (easily 1.5–6 MiB for an agent with real tool-call
+                    # context). Match the server's cap so replay frames
+                    # don't trip a false "message too big" close.
+                    max_size=26 * 1024 * 1024,
                 ) as websocket:
                     self._websocket = websocket
                     try:
