@@ -583,7 +583,15 @@ class OpenClawGatewayClient:
             list(data.keys()) if data else "none",
         )
 
-        self._buffer_agent_payload(agent_run, payload)
+        # Only the ``assistant`` stream carries user-visible text that should
+        # end up in the chat log and (via the delta stream) in the TTS output.
+        # Other streams emit text in ``data.text`` too — notably ``thinking``,
+        # which carries extended-reasoning deltas for Opus/Sonnet 5.x — and
+        # must not leak into the response the pipeline speaks aloud.
+        # ``None`` preserves compatibility with legacy gateways that omit the
+        # ``stream`` field entirely.
+        if stream in (None, "assistant"):
+            self._buffer_agent_payload(agent_run, payload)
 
         # Determine completion. The gateway multiplexes several streams under
         # the single "agent" event; only the run-level "lifecycle" stream's
