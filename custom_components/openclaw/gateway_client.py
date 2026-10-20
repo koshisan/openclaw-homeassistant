@@ -601,8 +601,17 @@ class OpenClawGatewayClient:
         phase = data.get("phase")
         run_terminal = self._is_run_lifecycle_event(stream, data)
 
-        if status in ("ok", "error"):
+        if status in ("ok", "error") and run_terminal:
             # Legacy completion signalled by a top-level status field.
+            # ``run_terminal`` guards against per-item/per-subagent status="ok"
+            # events (modern gateways emit one at every tool-call completion
+            # and at every subagent lifecycle end); without the guard, the
+            # first tool call closes the whole run and any assistant content
+            # emitted after the tool round-trip never reaches chat_log —
+            # observed symptom was `conversation.process` returning only the
+            # first 10-15 chars of Opus's preamble ("Auf dem Balk", "Im
+            # Wohnzim", "Guten Morgen") because the stream_queue got a `None`
+            # sentinel the moment Opus called its first tool.
             summary = payload.get("summary")
             agent_run.set_complete(status, summary)
             _LOGGER.info("Agent run %s completed with status: %s", run_id, status)
