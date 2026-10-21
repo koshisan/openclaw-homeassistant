@@ -78,6 +78,26 @@ class AgentRun:
             self._stream_queue.put_nowait(new_text)
             self._streamed_any = True
 
+    def add_delta(self, delta: str) -> None:
+        """Append a streaming delta without the cumulative-diff path.
+
+        For gateway events that only carry `data.delta` (every chunk after
+        the first in an assistant message), there's no accumulated `text`
+        to diff against — the delta IS the new text to append verbatim.
+        """
+        if not delta:
+            return
+        self._full_text += delta
+        _LOGGER.debug(
+            "Appended %d delta chars to %s (total: %d)",
+            len(delta),
+            self.run_id,
+            len(self._full_text),
+        )
+        if self._stream_queue is not None:
+            self._stream_queue.put_nowait(delta)
+            self._streamed_any = True
+
     def set_complete(self, status: str, summary: str | None = None) -> None:
         """Mark run as complete."""
         self.status = status
@@ -511,7 +531,21 @@ class OpenClawGatewayClient:
 
     @staticmethod
     def _buffer_agent_payload(agent_run: AgentRun, payload: dict[str, Any]) -> None:
-        """Buffer assistant text from a Gateway agent payload."""
+        """Buffer assistant text from a Gateway agent payload.
+
+        openclaw's assistant stream protocol emits two shapes of event per
+        message:
+
+          - first chunk:  data = {text: "<accumulated so far>",
+                                  delta: "<new chars>", itemId}
+          - every chunk after that:  data = {delta: "<new chars>", itemId}
+
+        Only the first chunk has `text`. Reading `text` alone caps every Opus
+        response at the first delta (observed: "Guten Morgen" / "Auf dem Balk"
+        / "Im Wohnzim" — always 10-15 chars, mid-word truncation). Handle the
+        delta-only continuations by appending `data.delta` directly through
+        AgentRun.add_delta.
+        """
         data = payload.get("data", {})
         if not isinstance(data, dict):
             data = {}
@@ -529,6 +563,11 @@ class OpenClawGatewayClient:
 
         if output:
             agent_run.add_output(output)
+            return
+
+        delta = data.get("delta")
+        if isinstance(delta, str) and delta:
+            agent_run.add_delta(delta)
 
     @staticmethod
     def _is_run_lifecycle_event(
