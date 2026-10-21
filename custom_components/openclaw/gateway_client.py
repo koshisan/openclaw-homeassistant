@@ -601,7 +601,7 @@ class OpenClawGatewayClient:
         phase = data.get("phase")
         run_terminal = self._is_run_lifecycle_event(stream, data)
 
-        if status in ("ok", "error") and run_terminal:
+        if status in ("ok", "error"):
             # Legacy completion signalled by a top-level status field.
             # ``run_terminal`` guards against per-item/per-subagent status="ok"
             # events (modern gateways emit one at every tool-call completion
