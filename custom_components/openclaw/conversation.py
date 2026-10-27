@@ -3,7 +3,9 @@
 import asyncio
 import dataclasses
 import logging
+import random
 import re
+import time
 from typing import Any, AsyncIterator
 
 from homeassistant.components import conversation
@@ -12,6 +14,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import intent
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
@@ -27,6 +30,8 @@ from .const import (
     CONF_STRIP_EMOJIS,
     CONF_SYSTEM_PROMPT,
     CONF_TTS_MAX_CHARS,
+    CONF_TTS_WARMUP_URL,
+    CONF_TTS_WARMUP_VOICE,
     DATA_CONVERSATION_STATUS,
     DEFAULT_BACKGROUND_ENABLED,
     DEFAULT_BACKGROUND_GRACE,
@@ -38,6 +43,8 @@ from .const import (
     DEFAULT_TTS_MAX_CHARS,
     DOMAIN,
     PROACTIVE_MODE_START_CONVERSATION,
+    TTS_WARMUP_TEXT,
+    TTS_WARMUP_TIMEOUT,
 )
 from .conversation_status import ConversationStatusTracker
 from .exceptions import (
@@ -51,23 +58,42 @@ from .templating import render as render_template
 
 _LOGGER = logging.getLogger(__name__)
 
-# Emoji pattern for removal from TTS
+# Emoji pattern for removal from TTS. Pictograph blocks only: the former
+# catch-all U+24C2–U+1F251 range also removed CJK, kana and hangul text.
 EMOJI_PATTERN = re.compile(
     "["
-    "\U0001F600-\U0001F64F"  # emoticons
+    "\U0001F000-\U0001F2FF"  # mahjong, domino, cards, enclosed alphanumerics
     "\U0001F300-\U0001F5FF"  # symbols & pictographs
+    "\U0001F600-\U0001F64F"  # emoticons
     "\U0001F680-\U0001F6FF"  # transport & map symbols
-    "\U0001F1E0-\U0001F1FF"  # flags (iOS)
-    "\U00002702-\U000027B0"  # dingbats
-    "\U000024C2-\U0001F251"
+    "\U0001F700-\U0001FAFF"  # geometric ext., supplemental symbols, pictographs ext.
+    "\U00002600-\U000027BF"  # misc symbols, dingbats
+    "\U00002B00-\U00002BFF"  # arrows & stars (⭐ ⬆)
+    "\U0000FE0E\U0000FE0F"  # variation selectors
+    "\U0000200D"  # zero-width joiner
+    "\U000020E3"  # combining keycap
+    "\U000E0020-\U000E007F"  # tag characters (subdivision flags)
     "]+",
     flags=re.UNICODE,
 )
+
+# HA's assist pipeline only starts streaming TTS once a reply has more than
+# this many characters (assist_pipeline STREAM_RESPONSE_CHARS).
+HA_STREAM_RESPONSE_CHARS = 60
 
 
 def strip_emojis(text: str) -> str:
     """Remove emojis from text for TTS."""
     return EMOJI_PATTERN.sub("", text).strip()
+
+
+def strip_emojis_chunk(chunk: str) -> str:
+    """Remove emojis from one streamed chunk, keeping its edge whitespace.
+
+    Unlike `strip_emojis`, nothing is trimmed: the spaces at chunk edges are
+    the word breaks between consecutive chunks.
+    """
+    return EMOJI_PATTERN.sub("", chunk)
 
 
 def trim_tts_text(text: str, max_chars: int) -> str:
@@ -340,6 +366,54 @@ class OpenClawConversationEntity(conversation.ConversationEntity):
             )
         return None
 
+    def _maybe_warm_up_tts(
+        self,
+        user_input: conversation.ConversationInput,
+        config: dict[str, Any],
+    ) -> None:
+        """Wake the TTS backend while the agent thinks (voice turns only)."""
+        url = (config.get(CONF_TTS_WARMUP_URL) or "").strip()
+        if not url:
+            return
+        if not (
+            getattr(user_input, "satellite_id", None)
+            or self._resolve_input_satellite(getattr(user_input, "device_id", None))
+        ):
+            return
+        payload: dict[str, Any] = {
+            "input": TTS_WARMUP_TEXT,
+            "response_format": "pcm",
+            "seed": random.randint(1, 2**31 - 1),
+        }
+        voice = (config.get(CONF_TTS_WARMUP_VOICE) or "").strip()
+        if voice:
+            payload["voice"] = voice
+        warm_up = self._async_warm_up_tts(url, payload)
+        create_background_task = getattr(
+            self.hass, "async_create_background_task", None
+        )
+        if create_background_task is not None:
+            create_background_task(warm_up, name="openclaw_tts_warmup")
+        else:
+            self.hass.async_create_task(warm_up)
+
+    async def _async_warm_up_tts(self, url: str, payload: dict[str, Any]) -> None:
+        """POST the warm-up synthesis and discard the audio."""
+        started = time.monotonic()
+        try:
+            async with asyncio.timeout(TTS_WARMUP_TIMEOUT):
+                session = async_get_clientsession(self.hass)
+                async with session.post(url, json=payload) as response:
+                    await response.read()
+            _LOGGER.debug(
+                "TTS warm-up answered %s in %.1fs",
+                response.status,
+                time.monotonic() - started,
+            )
+        except Exception as err:  # pylint: disable=broad-except
+            # Best effort: a failed warm-up only costs the latency it saves.
+            _LOGGER.debug("TTS warm-up failed: %s", err)
+
     def _prefix_user_message(
         self,
         user_input: conversation.ConversationInput,
@@ -500,11 +574,13 @@ class OpenClawConversationEntity(conversation.ConversationEntity):
 
         Background-defer still applies: if no first chunk arrives inside the
         grace window, hand off to `_defer_to_background` exactly as before.
-        The stream never emits emoji-stripped text — HA doesn't yet expose
-        a per-delta transform hook, so emoji handling stays a legacy path
-        concern (the strip runs in `_finalize_response` for non-streaming
-        paths and in `_async_announce` for background reports).
+        A preamble counts as first content, so a tool-using turn answers
+        inline with it instead of deferring.
+
+        With `strip_emojis`, each delta is stripped before it reaches the
+        chat log, so the streamed TTS never sees emojis.
         """
+        self._maybe_warm_up_tts(user_input, config)
         agent_run = await self._gateway_client.begin_agent_run(user_message)
         first_chunk: str | None = None
         deferred_result: conversation.ConversationResult | None = None
@@ -521,14 +597,33 @@ class OpenClawConversationEntity(conversation.ConversationEntity):
         if deferred_result is not None:
             return deferred_result
 
+        strip = config.get(CONF_STRIP_EMOJIS, DEFAULT_STRIP_EMOJIS)
+
+        async def _chunks():
+            if first_chunk:
+                yield first_chunk
+            async for chunk in self._gateway_client.stream_run(agent_run):
+                yield chunk
+
         async def _delta_stream():
             """Wrap OpenClaw's text chunks as AssistantContentDeltaDict."""
             # Signal a fresh assistant message. Everything after this delta
             # is `content` accumulated onto that message.
             yield {"role": "assistant"}
-            if first_chunk:
-                yield {"content": first_chunk}
-            async for chunk in self._gateway_client.stream_run(agent_run):
+            sent = 0
+            async for chunk in _chunks():
+                if strip:
+                    chunk = strip_emojis_chunk(chunk)
+                if not chunk:
+                    continue
+                sent += len(chunk)
+                # A finished paragraph (e.g. a preamble before tool calls)
+                # must be spoken now, but HA holds TTS until the reply passes
+                # its streaming threshold. Pad with spaces to get past it.
+                if chunk.endswith("\n") and sent <= HA_STREAM_RESPONSE_CHARS:
+                    padding = HA_STREAM_RESPONSE_CHARS + 1 - sent
+                    chunk += " " * padding
+                    sent += padding
                 yield {"content": chunk}
 
         # Consume the delta stream. `async_add_delta_content_stream`

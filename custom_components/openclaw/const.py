@@ -66,6 +66,16 @@ CONF_HOLDING_PHRASE = "holding_phrase"
 # renders with the calling satellite's area.
 CONF_SYSTEM_PROMPT = "system_prompt"
 DEFAULT_SYSTEM_PROMPT = ""
+# Optional TTS warm-up: when a voice (satellite) request starts, POST a tiny
+# synthesis to this OpenAI-compatible `/v1/audio/speech` URL so a TTS backend
+# that unloads its model when idle reloads it while the agent is thinking.
+# Empty URL = off. A random `seed` keeps response caches from answering it.
+CONF_TTS_WARMUP_URL = "tts_warmup_url"
+CONF_TTS_WARMUP_VOICE = "tts_warmup_voice"
+DEFAULT_TTS_WARMUP_URL = ""
+DEFAULT_TTS_WARMUP_VOICE = ""
+TTS_WARMUP_TEXT = "Hm."
+TTS_WARMUP_TIMEOUT = 120.0  # seconds; a cold backend may first start up
 # Connection states
 STATE_CONNECTED = "connected"
 STATE_DISCONNECTED = "disconnected"

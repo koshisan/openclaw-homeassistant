@@ -72,6 +72,8 @@
           "thinking": "Thinking mode override (optional)",
           "strip_emojis": "Strip emojis from TTS speech",
           "tts_max_chars": "TTS max characters (0 = no limit)",
+          "tts_warmup_url": "TTS warm-up URL (OpenAI-compatible /v1/audio/speech; empty = off). Voice requests send a short synthesis here so an idle TTS backend reloads its model while the agent thinks",
+          "tts_warmup_voice": "TTS warm-up voice (optional)",
           "system_prompt": "System prefix prepended to every request. Supports Jinja templates rendered on each request against Home Assistant state.",
           "background_enabled": "Background work: answer slow requests via a later announcement instead of timing out",
           "background_grace": "Grace period (seconds of silence before deferring to background)",

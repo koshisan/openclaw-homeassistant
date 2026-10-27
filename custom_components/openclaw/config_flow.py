@@ -27,6 +27,8 @@ from .const import (
     CONF_SYSTEM_PROMPT,
     CONF_THINKING,
     CONF_TTS_MAX_CHARS,
+    CONF_TTS_WARMUP_URL,
+    CONF_TTS_WARMUP_VOICE,
     CONF_USE_SSL,
     DEFAULT_AGENT_ID,
     DEFAULT_BACKGROUND_ENABLED,
@@ -42,6 +44,8 @@ from .const import (
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_THINKING,
     DEFAULT_TTS_MAX_CHARS,
+    DEFAULT_TTS_WARMUP_URL,
+    DEFAULT_TTS_WARMUP_VOICE,
     DEFAULT_TIMEOUT,
     DEFAULT_USE_SSL,
     DOMAIN,
@@ -190,6 +194,32 @@ def _background_schema_fields(current: dict[str, Any] | None = None) -> dict:
             CONF_HOLDING_PHRASE,
             default=current.get(CONF_HOLDING_PHRASE, DEFAULT_HOLDING_PHRASE),
         ): str,
+    }
+
+
+def _tts_warmup_schema_fields(current: dict[str, Any] | None = None) -> dict:
+    """TTS warm-up fields for the options form (empty URL = off)."""
+    current = current or {}
+    text = selector.TextSelector(
+        selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
+    )
+    return {
+        vol.Optional(
+            CONF_TTS_WARMUP_URL,
+            description={
+                "suggested_value": current.get(
+                    CONF_TTS_WARMUP_URL, DEFAULT_TTS_WARMUP_URL
+                )
+            },
+        ): text,
+        vol.Optional(
+            CONF_TTS_WARMUP_VOICE,
+            description={
+                "suggested_value": current.get(
+                    CONF_TTS_WARMUP_VOICE, DEFAULT_TTS_WARMUP_VOICE
+                )
+            },
+        ): text,
     }
 
 
@@ -578,6 +608,7 @@ class OpenClawOptionsFlowHandler(config_entries.OptionsFlow):
                         CONF_TTS_MAX_CHARS, DEFAULT_TTS_MAX_CHARS
                     ),
                 ): vol.All(int, vol.Range(min=0, max=2000)),
+                **_tts_warmup_schema_fields(current),
                 vol.Optional(
                     CONF_SYSTEM_PROMPT,
                     default=current.get(

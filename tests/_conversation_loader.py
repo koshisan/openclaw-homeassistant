@@ -47,6 +47,8 @@ def load_conversation_module(*, streaming: str = "none") -> ModuleType:
     intent_mod = _stub_module("homeassistant.helpers.intent")
     _stub_module("homeassistant.helpers")
     entity_platform_mod = _stub_module("homeassistant.helpers.entity_platform")
+    aiohttp_client_mod = _stub_module("homeassistant.helpers.aiohttp_client")
+    aiohttp_client_mod.async_get_clientsession = lambda _hass: None
     er_mod = _stub_module("homeassistant.helpers.entity_registry")
     er_mod.async_get = lambda _hass: None
     er_mod.async_entries_for_device = lambda _registry, _device_id: []

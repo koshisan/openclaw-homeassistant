@@ -18,6 +18,14 @@ from .gateway import GatewayProtocol
 
 _LOGGER = logging.getLogger(__name__)
 
+# Separates two messages (a preamble and the answer) in the streamed text.
+PARAGRAPH_BREAK = "\n\n"
+
+
+def _squash(text: str) -> str:
+    """Collapse whitespace, matching the gateway's preamble normalization."""
+    return " ".join(text.split())
+
 
 class AgentRun:
     """Tracks an agent run and buffers its events."""
@@ -37,8 +45,63 @@ class AgentRun:
         # Set once the completion sentinel has been dequeued, so a consumer
         # that peeked the sentinel (grace race) doesn't wait for a second one.
         self._stream_done = False
+        # Everything queued so far (answer text and preambles), plus the item
+        # the last chunk belonged to. A chunk from a different item gets a
+        # paragraph break so two messages never run together in TTS.
+        self._queued_text = ""
+        self._last_item: str | None = None
+        # Preamble (pre-tool commentary) text already handled, per item.
+        self._preambles: dict[str, str] = {}
 
-    def add_output(self, output: str) -> None:
+    def _queue(self, text: str, item_id: str | None = None) -> None:
+        """Push a chunk to the stream queue, separating distinct items."""
+        if not text or self._stream_queue is None:
+            return
+        if (
+            item_id != self._last_item
+            and self._queued_text
+            and not self._queued_text[-1].isspace()
+            and not text[0].isspace()
+        ):
+            text = PARAGRAPH_BREAK + text
+        self._last_item = item_id
+        self._queued_text += text
+        self._stream_queue.put_nowait(text)
+        self._streamed_any = True
+
+    def _queue_paragraph_end(self) -> None:
+        """End the current paragraph so streaming TTS can speak it right away.
+
+        A sentence-splitting TTS holds the last sentence until the next one
+        starts; a trailing paragraph break tells it nothing follows directly.
+        """
+        if self._queued_text and not self._queued_text.endswith("\n"):
+            self._queue(PARAGRAPH_BREAK, self._last_item)
+
+    def add_preamble(self, item_id: str, text: str, final: bool) -> None:
+        """Queue pre-tool commentary ("Moment, ich schaue nach").
+
+        The gateway reports it as `item` events with `kind: preamble` and the
+        whitespace-normalized text so far in `progressText`, not on the
+        `assistant` stream. It is the only content a tool-using turn produces
+        before its tools run, so speaking it is what keeps a voice reply
+        fast. Text already queued as answer text is not repeated, and a
+        rewritten preamble is ignored: spoken audio cannot be taken back.
+        """
+        previous = self._preambles.get(item_id, "")
+        if text.startswith(previous):
+            self._preambles[item_id] = text
+            new_text = text[len(previous) :]
+            if new_text.strip() and _squash(text) not in _squash(self._queued_text):
+                if not previous:
+                    new_text = new_text.lstrip()
+                self._queue(new_text, f"preamble:{item_id}")
+        else:
+            _LOGGER.debug("Ignoring rewritten preamble for %s", self.run_id)
+        if final:
+            self._queue_paragraph_end()
+
+    def add_output(self, output: str, item_id: str | None = None) -> None:
         """Add output to buffer. Gateway sends cumulative text, extract only new chars."""
         if not output:
             return
@@ -74,11 +137,9 @@ class AgentRun:
             new_text = output
             self._full_text = output
 
-        if new_text and self._stream_queue is not None:
-            self._stream_queue.put_nowait(new_text)
-            self._streamed_any = True
+        self._queue(new_text, item_id)
 
-    def add_delta(self, delta: str) -> None:
+    def add_delta(self, delta: str, item_id: str | None = None) -> None:
         """Append a streaming delta without the cumulative-diff path.
 
         For gateway events that only carry `data.delta` (every chunk after
@@ -94,9 +155,7 @@ class AgentRun:
             self.run_id,
             len(self._full_text),
         )
-        if self._stream_queue is not None:
-            self._stream_queue.put_nowait(delta)
-            self._streamed_any = True
+        self._queue(delta, item_id)
 
     def set_complete(self, status: str, summary: str | None = None) -> None:
         """Mark run as complete."""
@@ -109,10 +168,10 @@ class AgentRun:
             # would speak the raw error via TTS and, by setting had_content, would
             # suppress the conversation entity's friendly error fallback.
             # stream_agent_request still raises on error status once the queue
-            # drains, so the caller fails cleanly.
-            if status == "ok" and summary and not self._streamed_any:
-                self._stream_queue.put_nowait(summary)
-                self._streamed_any = True
+            # drains, so the caller fails cleanly. A preamble alone is not an
+            # answer, so the summary still follows one.
+            if status == "ok" and summary and not self._full_text:
+                self._queue(summary, "summary")
             self._stream_queue.put_nowait(None)
 
     def get_response(self) -> str:
@@ -561,13 +620,26 @@ class OpenClawGatewayClient:
                         output = item["text"]
                         break
 
+        item_id = data.get("itemId")
         if output:
-            agent_run.add_output(output)
+            agent_run.add_output(output, item_id)
             return
 
         delta = data.get("delta")
         if isinstance(delta, str) and delta:
-            agent_run.add_delta(delta)
+            agent_run.add_delta(delta, item_id)
+
+    @staticmethod
+    def _buffer_preamble(agent_run: AgentRun, data: dict[str, Any]) -> None:
+        """Buffer pre-tool commentary from an `item` event, if it is one."""
+        if data.get("kind") != "preamble":
+            return
+        text = data.get("progressText")
+        if not isinstance(text, str):
+            return
+        agent_run.add_preamble(
+            str(data.get("itemId") or ""), text, final=data.get("phase") == "end"
+        )
 
     @staticmethod
     def _is_run_lifecycle_event(
@@ -631,6 +703,8 @@ class OpenClawGatewayClient:
         # ``stream`` field entirely.
         if stream in (None, "assistant"):
             self._buffer_agent_payload(agent_run, payload)
+        elif stream == "item" and isinstance(data, dict):
+            self._buffer_preamble(agent_run, data)
 
         # Determine completion. The gateway multiplexes several streams under
         # the single "agent" event; only the run-level "lifecycle" stream's
