@@ -23,6 +23,11 @@ PROACTIVE_MODE_START_CONVERSATION = "start_conversation"
 # Ignore session-message echoes of the user's own Q&A that land within this many
 # seconds of local agent activity (the satellite already spoke those).
 PROACTIVE_SUPPRESS_SECONDS = 15.0
+# How long a message from another client (chat UI, Telegram) waits for its reply
+# before the next assistant message counts as agent-initiated again.
+PROACTIVE_PERSON_TURN_SECONDS = 600.0
+# Identical assistant text within this window is a mirrored channel delivery.
+PROACTIVE_DUPLICATE_SECONDS = 300.0
 
 # Background work: when a request produces no content within the grace period,
 # speak a holding phrase, let the run finish detached, and announce the result

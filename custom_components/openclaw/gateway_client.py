@@ -4,9 +4,14 @@ import asyncio
 import logging
 import time
 import uuid
+from collections import deque
 from typing import Any, AsyncIterator, Callable
 
-from .const import PROACTIVE_SUPPRESS_SECONDS
+from .const import (
+    PROACTIVE_DUPLICATE_SECONDS,
+    PROACTIVE_PERSON_TURN_SECONDS,
+    PROACTIVE_SUPPRESS_SECONDS,
+)
 from .exceptions import (
     AgentExecutionError,
     GatewayAuthenticationError,
@@ -254,6 +259,11 @@ class OpenClawGatewayClient:
         # suppress echoes of the user's own conversation turns.
         self._proactive_callback: Callable[[str], None] | None = None
         self._last_local_turn: float = 0.0
+        # Turns started by a person on another client of the same session.
+        self._person_runs: deque[str] = deque(maxlen=32)
+        self._person_turns: deque[float] = deque()
+        self._last_assistant_text: str = ""
+        self._last_assistant_time: float = 0.0
 
         # Register event handlers
         self._gateway.on_event("agent", self._handle_agent_event)
@@ -828,35 +838,101 @@ class OpenClawGatewayClient:
     def _handle_session_message(self, event: dict[str, Any]) -> None:
         """Announce agent-initiated assistant turns via the proactive callback.
 
-        Skips the echo of the user's own conversation turns: any assistant
-        message arriving close to local agent activity (see _last_local_turn)
-        was already spoken through the normal conversation pipeline.
+        Skips everything a person asked for:
+        - the echo of the user's own conversation turns: any assistant message
+          arriving close to local agent activity (see _last_local_turn) was
+          already spoken through the normal conversation pipeline;
+        - replies to messages sent from another client (chat UI, app, Telegram),
+          which share this session but were never meant to be spoken.
         """
         if self._proactive_callback is None:
             return
         payload = event.get("payload", {})
         message = payload.get("message") or {}
-        if not isinstance(message, dict) or message.get("role") != "assistant":
+        if not isinstance(message, dict):
             return
+        if message.get("role") == "user":
+            self._note_user_message(message)
+            return
+        if message.get("role") != "assistant":
+            return
+        text = self._extract_message_text(message)
+        if not text:
+            return
+        now = time.monotonic()
+        # Channel deliveries are mirrored into the session as a second copy
+        # without a run id.
+        duplicate = (
+            text == self._last_assistant_text
+            and now - self._last_assistant_time < PROACTIVE_DUPLICATE_SECONDS
+        )
+        self._last_assistant_text = text
+        self._last_assistant_time = now
         # A run we started (including one detached past the grace period) can
         # take arbitrarily long, so suppress while any local run is in flight,
         # plus a short tail after the last local activity to cover the gap
         # between run completion and its echo arriving.
-        if self._agent_runs or (
-            time.monotonic() - self._last_local_turn < PROACTIVE_SUPPRESS_SECONDS
-        ):
+        if self._agent_runs or now - self._last_local_turn < PROACTIVE_SUPPRESS_SECONDS:
             _LOGGER.debug(
                 "Suppressing session message near a local turn (run echo)"
             )
             return
-        text = self._extract_message_text(message)
-        if not text:
+        if duplicate:
+            _LOGGER.debug("Suppressing mirrored copy of an assistant message")
+            return
+        if self._answers_person(message, payload, now):
+            _LOGGER.debug("Suppressing reply to a message from another client")
             return
         _LOGGER.debug("Proactive assistant message detected (%d chars)", len(text))
         try:
             self._proactive_callback(text)
         except Exception:  # pylint: disable=broad-except
             _LOGGER.exception("Proactive callback failed")
+
+    def _note_user_message(self, message: dict[str, Any]) -> None:
+        """Remember that a person started a turn.
+
+        Heartbeat prompts never reach subscribers; other system input (exec
+        results, notification events, cron, other sessions) carries a provenance
+        and may legitimately produce something worth speaking.
+        """
+        provenance = message.get("provenance")
+        if isinstance(provenance, dict) and provenance.get("kind"):
+            return
+        meta = message.get("__openclaw")
+        key = message.get("idempotencyKey") or (
+            meta.get("idempotencyKey") if isinstance(meta, dict) else None
+        )
+        if isinstance(key, str) and key.endswith(":user"):
+            # Gateway clients: the key names the run that will answer.
+            self._person_runs.append(key.removesuffix(":user"))
+        else:
+            # Channels such as Telegram: the next new run answers this message.
+            self._person_turns.append(time.monotonic())
+
+    def _answers_person(
+        self, message: dict[str, Any], payload: dict[str, Any], now: float
+    ) -> bool:
+        """Return whether an assistant message belongs to a person's turn."""
+        meta = message.get("__openclaw")
+        run_id = (meta.get("runId") if isinstance(meta, dict) else None) or payload.get(
+            "runId"
+        )
+        if run_id and run_id in self._person_runs:
+            return True
+        # A message that never got a visible reply must not swallow a later
+        # reminder, so a waiting turn only counts for a limited time.
+        while (
+            self._person_turns
+            and now - self._person_turns[0] > PROACTIVE_PERSON_TURN_SECONDS
+        ):
+            self._person_turns.popleft()
+        if not self._person_turns:
+            return False
+        if run_id:
+            self._person_turns.popleft()
+            self._person_runs.append(run_id)
+        return True
 
     async def health(self) -> dict[str, Any]:
         """Get Gateway health status."""

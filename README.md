@@ -342,8 +342,9 @@ Enable it under **Configure**:
   - `announce` — speak the message.
   - `start_conversation` — speak it **and** reopen the mic for your reply.
 
-Replies you trigger yourself are never re-announced — only agent-*initiated* turns
-are.
+Replies you trigger yourself are never re-announced, whether you asked by voice or
+from another client of the same session (chat UI, app, Telegram) — only
+agent-*initiated* turns are.
 
 > **It needs a trigger.** Proactive voice is a *delivery* mechanism: it speaks when
 > the gateway produces a proactive turn — an agent **cron job**, a **background

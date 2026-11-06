@@ -52,6 +52,86 @@ class TestProactiveDedup:
         client._handle_session_message(self._msg("user", "turn on lights"))
         assert seen == []
 
+    @staticmethod
+    def _run_msg(role: str, content: str, run: str | None = None, **extra) -> dict:
+        meta = {"runId": run} if run else {}
+        return {
+            "payload": {
+                "message": {"role": role, "content": content, "__openclaw": meta, **extra}
+            }
+        }
+
+    def _client(self) -> tuple:
+        client = OpenClawGatewayClient("localhost", 1, None)
+        seen: list[str] = []
+        client.set_proactive_handler(seen.append)
+        return client, seen
+
+    def test_reply_to_chat_ui_message_is_not_announced(self) -> None:
+        client, seen = self._client()
+        client._handle_session_message(
+            self._run_msg("user", "question", idempotencyKey="run1:user")
+        )
+        client._handle_session_message(self._run_msg("assistant", "one moment", "run1"))
+        client._handle_session_message(self._run_msg("assistant", "answer", "run1"))
+        assert seen == []
+
+    def test_reply_to_telegram_message_and_its_mirror_are_not_announced(self) -> None:
+        client, seen = self._client()
+        client._handle_session_message(self._run_msg("user", "question"))
+        client._handle_session_message(self._run_msg("assistant", "one moment", "run1"))
+        client._handle_session_message(self._run_msg("assistant", "answer", "run1"))
+        client._handle_session_message(self._run_msg("assistant", "answer"))
+        assert seen == []
+
+    def test_mirror_arriving_before_the_run_does_not_use_up_the_turn(self) -> None:
+        client, seen = self._client()
+        client._handle_session_message(self._run_msg("user", "question"))
+        client._handle_session_message(self._run_msg("assistant", "status output"))
+        client._handle_session_message(self._run_msg("assistant", "answer", "run1"))
+        assert seen == []
+
+    def test_reminder_after_a_chat_turn_is_announced(self) -> None:
+        # Heartbeat prompts are hidden from subscribers: only the new run shows.
+        client, seen = self._client()
+        client._handle_session_message(self._run_msg("user", "q", idempotencyKey="run1:user"))
+        client._handle_session_message(self._run_msg("assistant", "answer", "run1"))
+        client._handle_session_message(self._run_msg("assistant", "duck is done", "beat1"))
+        assert seen == ["duck is done"]
+
+    def test_reminder_after_a_telegram_turn_is_announced(self) -> None:
+        client, seen = self._client()
+        client._handle_session_message(self._run_msg("user", "q"))
+        client._handle_session_message(self._run_msg("assistant", "answer", "run1"))
+        client._handle_session_message(self._run_msg("assistant", "duck is done", "beat1"))
+        assert seen == ["duck is done"]
+
+    def test_system_input_is_not_a_person(self) -> None:
+        client, seen = self._client()
+        client._handle_session_message(
+            self._run_msg(
+                "user",
+                "exec finished",
+                provenance={"kind": "internal_system", "sourceTool": "exec"},
+            )
+        )
+        client._handle_session_message(self._run_msg("assistant", "build failed", "run1"))
+        assert seen == ["build failed"]
+
+    def test_unanswered_message_expires(self) -> None:
+        # The agent stayed silent: a later reminder must still be spoken.
+        client, seen = self._client()
+        client._handle_session_message(self._run_msg("user", "ok thanks"))
+        client._person_turns[0] -= 601
+        client._handle_session_message(self._run_msg("assistant", "duck is done", "beat1"))
+        assert seen == ["duck is done"]
+
+    def test_mirrored_reminder_is_announced_once(self) -> None:
+        client, seen = self._client()
+        client._handle_session_message(self._run_msg("assistant", "duck is done", "beat1"))
+        client._handle_session_message(self._run_msg("assistant", "duck is done"))
+        assert seen == ["duck is done"]
+
     def test_no_handler_is_noop(self) -> None:
         client = OpenClawGatewayClient("localhost", 1, None)
         # No proactive handler registered -> ignored, no error raised.
