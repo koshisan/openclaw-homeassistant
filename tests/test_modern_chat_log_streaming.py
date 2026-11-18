@@ -125,3 +125,39 @@ class TestModernStreaming:
         ]
         # First chunk peeked before defer race, then rest streamed after
         assert content_chunks == ["First. ", "Second."]
+
+    @pytest.mark.parametrize(
+        ("chunks", "expected"),
+        [
+            # Question not at the very end: HA's own rule says no, ours yes.
+            (["Soll ich den Ofen vorheizen? ", "Sag kurz Ja, dann starte ich ihn."], True),
+            (["Der Ofen heizt vor."], False),
+            (["Ich hab „Geht er noch?“ verstanden. ", "Er druckt noch."], False),
+        ],
+    )
+    async def test_sets_continue_conversation_on_followup(
+        self, chunks: list[str], expected: bool
+    ) -> None:
+        entity = _make_entity(_FakeGatewayClient(_FakeAgentRun(chunks)))
+        result = await entity._handle_chat_log_streaming(
+            _user_input(), _make_chat_log(), "Hallo", {"background_enabled": False}
+        )
+        assert getattr(result, "continue_conversation", False) is expected
+
+    async def test_keeps_ha_continue_true(self) -> None:
+        entity = _make_entity(_FakeGatewayClient(_FakeAgentRun(["Done."])))
+        original = _conv.conversation.async_get_result_from_chat_log
+
+        def _ha_says_continue(user_input, chat_log):
+            result = original(user_input, chat_log)
+            result.continue_conversation = True
+            return result
+
+        _conv.conversation.async_get_result_from_chat_log = _ha_says_continue
+        try:
+            result = await entity._handle_chat_log_streaming(
+                _user_input(), _make_chat_log(), "Hallo", {"background_enabled": False}
+            )
+        finally:
+            _conv.conversation.async_get_result_from_chat_log = original
+        assert result.continue_conversation is True

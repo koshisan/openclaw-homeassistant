@@ -65,6 +65,21 @@ def test_response_expects_followup_helper() -> None:
     assert conv.response_expects_followup("Done.") is False
     assert conv.response_expects_followup("") is False
     assert conv.response_expects_followup(None) is False  # type: ignore[arg-type]
+    # Question mid-reply, closing line after it (seen live 2026-11-18).
+    assert conv.response_expects_followup(
+        "Soll ich den Ofen vorheizen? Oder meinst du etwas anderes? "
+        "Sag kurz Ja, dann starte ich ihn."
+    ) is True
+    assert conv.response_expects_followup("今日は何をしますか？") is True
+    # Echoed user words in quotes are not a question to the user.
+    assert conv.response_expects_followup(
+        "Ich hab „Gehen Sie noch?“ als Frage nach dem Drucker verstanden. "
+        "Ja, er druckt noch."
+    ) is False
+    assert conv.response_expects_followup('You said "done?" so I stopped.') is False
+    assert conv.response_expects_followup(
+        "Ich hab „Druckt er?“ verstanden. Soll ich nachsehen?"
+    ) is True
 
 
 # ---------- non-streaming path ----------

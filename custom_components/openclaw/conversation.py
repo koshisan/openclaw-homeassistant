@@ -105,13 +105,19 @@ def trim_tts_text(text: str, max_chars: int) -> str:
     return text[: max_chars - 3].rstrip() + "..."
 
 
+_FOLLOWUP_QUESTION_RE = re.compile(r"[?？](?![\"'“”„‟«»‹›‘’‚」』])")
+
+
 def response_expects_followup(text: str) -> bool:
     """Return True if the response looks like it asks a follow-up question.
 
     Keeps the satellite mic open so the user can reply without re-triggering
-    the wake word. We treat any "?" in the reply as a follow-up cue.
+    the wake word. Any "?" (or full-width "？") in the reply counts as a
+    follow-up cue, even mid-reply ("Soll ich …? Sag kurz Ja."), except one
+    directly closing a quotation (`I took “Is it done?” as …`): that is the
+    user's words being echoed, not a question to them.
     """
-    return "?" in (text or "")
+    return bool(_FOLLOWUP_QUESTION_RE.search(text or ""))
 
 
 def _set_continue_conversation(
@@ -598,6 +604,7 @@ class OpenClawConversationEntity(conversation.ConversationEntity):
             return deferred_result
 
         strip = config.get(CONF_STRIP_EMOJIS, DEFAULT_STRIP_EMOJIS)
+        spoken: list[str] = []
 
         async def _chunks():
             if first_chunk:
@@ -616,6 +623,7 @@ class OpenClawConversationEntity(conversation.ConversationEntity):
                     chunk = strip_emojis_chunk(chunk)
                 if not chunk:
                     continue
+                spoken.append(chunk)
                 sent += len(chunk)
                 # A finished paragraph (e.g. a preamble before tool calls)
                 # must be spoken now, but HA holds TTS until the reply passes
@@ -638,6 +646,14 @@ class OpenClawConversationEntity(conversation.ConversationEntity):
         result = conversation.async_get_result_from_chat_log(
             user_input, chat_log
         )
+        # HA derives continue_conversation from the chat log, which only
+        # counts a reply whose very end is "?". Nadeko often asks and then
+        # adds a closing line ("Soll ich …? Sag kurz Ja, dann …."), so apply
+        # our own follow-up rule on top; HA's own True is kept.
+        if not getattr(result, "continue_conversation", False):
+            _set_continue_conversation(
+                result, response_expects_followup("".join(spoken))
+            )
         tracker = self._status()
         if tracker is not None:
             tracker.set_idle()
